@@ -126,8 +126,6 @@ class Pirum_CLI
     }
 
     copy($this->options[3], $target.'/get/'.basename($this->options[3]));
-    system('cd '.$target.'/get/ && gunzip -f '.basename($this->options[3]));
-    copy($this->options[3], $target.'/get/'.basename($this->options[3]));
 
     $this->runBuild($target);
 
@@ -1037,7 +1035,30 @@ class Pirum_Package
 
   public function __destruct()
   {
-    system('rm -rf '.$this->tmpDir);
+    $this->removeDir($this->tmpDir);
+  }
+
+  protected function removeDir($target)
+  {
+    $fp = opendir($target);
+    while (false !== $file = readdir($fp))
+    {
+      if (in_array($file, array('.', '..')))
+      {
+        continue;
+      }
+
+      if (is_dir($target.'/'.$file))
+      {
+        $this->removeDir($target.'/'.$file);
+        rmdir($target.'/'.$file);
+      }
+      else
+      {
+        unlink($target.'/'.$file);
+      }
+    }
+    closedir($fp);
   }
 
   public function getDate($format = 'Y-m-d H:i:s')
@@ -1171,15 +1192,47 @@ class Pirum_Package
 
   public function loadPackageFromArchive()
   {
-    copy($this->archive, $this->tmpDir.'/archive.tgz');
-    system('cd '.$this->tmpDir.' && tar zxpf archive.tgz');
+    $gz = gzopen($this->archive, 'r');
+    $tar = '';
+    while (!gzeof($gz)) {
+      $tar.= gzread($gz, 10000);
+    }
+    gzclose($gz);
 
-    if (!is_file($this->tmpDir.'/package.xml'))
-    {
-      throw new InvalidArgumentException('The PEAR package does not have a package.xml file.');
+    while (strlen($tar)) {
+      $file = array();
+
+      $file['filename'] = rtrim(substr($tar, 0, 100), chr(0));
+      $file['filemode'] = rtrim(substr($tar, 100, 8), chr(0));
+      $file['owner_id'] = octdec(rtrim(substr($tar, 108, 8), chr(0)));
+      $file['group_id'] = octdec(rtrim(substr($tar, 116, 8), chr(0)));
+      $file['filesize'] = octdec(rtrim(substr($tar, 124, 12), chr(0)));
+      $file['mod_time'] = date('n-j-Y H:i:s', octdec(rtrim(substr($tar, 136, 12), chr(0))));
+      $file['checksum'] = octdec(rtrim(substr($tar, 148, 8), chr(0)));
+      $file['filetype'] = octdec(rtrim(substr($tar, 156, 1), chr(0)));
+      $file['linked']   = rtrim(substr($tar, 157, 100), chr(0));
+
+      $checksum = 0;
+      $tar = substr_replace($tar, '        ', 148, 8);
+      for ($i = 0; $i < 512; $i++) {
+          $checksum+= ord($tar[$i]);
+      }
+
+      if ($file['filename'] == 'package.xml' && $file['checksum'] == $checksum) {
+        $package = substr($tar, 512, (int) $file['filesize']);
+        $this->packageFile = $this->tmpDir.'/package.xml';
+
+        file_put_contents($this->packageFile, $package);
+
+        $this->package = new SimpleXMLElement($package);
+
+        return;
+      }
+      $offset = $file['filesize'] % 512 == 0 ? $file['filesize'] : $file['filesize'] + (512 - $file['filesize'] % 512);
+      $tar = substr($tar, 512 + $offset);
     }
 
-    $this->loadPackageFromFile($this->tmpDir.'/package.xml');
+    throw new InvalidArgumentException('The PEAR package does not have a package.xml file.');
   }
 
   protected function XMLToArray($xml)
